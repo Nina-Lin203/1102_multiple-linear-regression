@@ -115,4 +115,8 @@ VIF = 1 / (1 - R²)
 
 ## 授權與資料來源
 
-本專案程式碼與資料的使用，請依原始資料來源及相關授權條款辦理。
+本專案使用的 PISA 測驗資料來源：
+
+- Kaggle：<https://www.kaggle.com/datasets/econdata/pisa-test-scores>
+
+資料的使用與再散布，請依 Kaggle 資料集頁面所列的原始授權條款辦理。本專案程式碼則請依其各自適用的授權條款使用。
