@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PISA 2009 閱讀分數多元線性迴歸</title>
+  <style>
+    :root { --ink:#17202a; --muted:#667085; --brand:#2457a6; --line:#dfe5ee; --bg:#f5f7fb; --card:#fff; }
+    * { box-sizing:border-box; } body { margin:0; color:var(--ink); background:var(--bg); font:15px/1.55 system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif; }
+    header { color:#fff; background:linear-gradient(120deg,#193c78,#3178bb); padding:38px max(20px,calc((100% - 1180px)/2)); }
+    header h1 { margin:0 0 6px; font-size:clamp(25px,4vw,40px); } header p { margin:0; opacity:.9; }
+    main { max-width:1180px; margin:24px auto; padding:0 16px; } .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:18px; }
+    .card { grid-column:span 12; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; box-shadow:0 2px 8px #17202a0b; }
+    .half { grid-column:span 6; } h2 { margin:0 0 12px; font-size:21px; } h3 { margin:18px 0 8px; font-size:17px; }
+    .muted { color:var(--muted); } .controls { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+    .status { display:inline-block; padding:9px 12px; border-radius:7px; background:#edf4ff; color:#174b8d; }
+    .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-top:14px; }
+    .stat { border:1px solid var(--line); border-radius:8px; padding:12px; } .stat b { display:block; font-size:24px; color:var(--brand); }
+    table { width:100%; border-collapse:collapse; font-size:13px; } th,td { border-bottom:1px solid var(--line); padding:7px 8px; text-align:left; } th { background:#f1f5fa; position:sticky; top:0; }
+    .table-wrap { max-height:330px; overflow:auto; border:1px solid var(--line); border-radius:7px; } canvas { width:100%; height:310px; border:1px solid var(--line); border-radius:7px; background:#fff; }
+    .coef-positive { color:#16734a; } .coef-negative { color:#b33a3a; } .right { text-align:right; } .formula { background:#f7f9fc; padding:12px; border-radius:7px; overflow:auto; white-space:nowrap; font-family:ui-monospace,monospace; font-size:12px; }
+    @media (max-width:760px) { .half { grid-column:span 12; } header { padding:28px 18px; } }
+  </style>
+</head>
+<body>
+  <header><h1>PISA 2009 閱讀分數預測</h1><p>以多元線性迴歸分析學生背景、家庭與學校特徵對 <b>readingScore</b> 的影響</p></header>
+  <main>
+    <div class="grid">
+      <section class="card">
+        <h2>資料集</h2>
+        <p class="muted">本頁固定使用同一資料夾內建的 <code>pisa2009train.csv</code>。資料會刪除任何含 NA 的列，並將 raceeth 轉為 one-hot（以第一類別作為基準）。</p>
+        <div><span id="status" class="status">準備載入資料…</span></div>
+        <div id="stats" class="stats"></div>
+      </section>
+      <section class="card">
+        <h2>模型評估</h2>
+        <div id="metrics" class="stats"><div class="stat"><span class="muted">狀態</span><b>尚未載入</b></div></div>
+        <h3>模型方程式</h3><div id="formula" class="formula">載入資料後顯示</div>
+      </section>
+      <section class="card"><h2>實際值 vs 預測值</h2><canvas id="plot" width="900" height="310"></canvas><p class="muted">點越接近虛線 y = x，預測越準確。</p></section>
+      <section class="card"><h2>特徵係數</h2><div class="table-wrap"><table><thead><tr><th>特徵</th><th>中文特徵</th><th class="right">係數</th><th class="right">標準化係數 β</th><th class="right">t 值</th><th class="right">p 值</th><th class="right">共線性 VIF</th></tr></thead><tbody id="coefs"></tbody></table></div></section>
+      <section class="card"><h2>依係數檢定縮減特徵</h2><div id="reduced-model" class="muted">資料載入後顯示縮減模型結果。</div></section>
+      <section class="card"><h2>殘差明細表</h2><p class="muted">以下顯示縮減模型保留的特徵，以及完整模型的預測結果；殘差 = 實際 readingScore − 預測值。</p><div class="table-wrap"><table><thead id="residual-head"></thead><tbody id="residuals"></tbody></table></div></section>
+      <section class="card"><h2>分析報告</h2><div id="report" class="muted">資料載入後顯示分析報告。</div></section>
+    </div>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    let dataset = [], model = null, reducedModel = null;
+    function parseCSV(text) {
+      const out = [], row = []; let cell = "", quoted = false;
+      for (let i=0; i<text.length; i++) { const c=text[i], n=text[i+1];
+        if (c === '"' && quoted && n === '"') { cell += '"'; i++; }
+        else if (c === '"') quoted = !quoted;
+        else if (c === ',' && !quoted) { row.push(cell); cell=""; }
+        else if ((c === '\n' || c === '\r') && !quoted) { if (c === '\r' && n === '\n') i++; row.push(cell); if (row.some(x=>x!=="")) out.push(row.slice()); row.length=0; cell=""; }
+        else cell += c;
+      }
+      if (cell || row.length) { row.push(cell); out.push(row); }
+      const headers = out.shift().map(x=>x.trim()); return out.map(r => Object.fromEntries(headers.map((h,i)=>[h,(r[i]||"").trim()])));
+    }
+    function inverse(a) {
+      const n=a.length, m=a.map((r,i)=>r.concat(Array.from({length:n},(_,j)=>i===j?1:0)));
+      for(let col=0;col<n;col++){ let pivot=col; for(let r=col+1;r<n;r++) if(Math.abs(m[r][col])>Math.abs(m[pivot][col])) pivot=r;
+        if(Math.abs(m[pivot][col])<1e-10) throw Error("矩陣無法反矩陣"); [m[col],m[pivot]]=[m[pivot],m[col]];
+        const d=m[col][col]; for(let j=0;j<2*n;j++) m[col][j]/=d;
+        for(let r=0;r<n;r++) if(r!==col){const f=m[r][col]; for(let j=0;j<2*n;j++) m[r][j]-=f*m[col][j];}
+      } return m.map(r=>r.slice(n));
+    }
+    function logGamma(z) {
+      const coefficients=[676.5203681218851,-1259.1392167224028,771.32342877765313,-176.61502916214059,12.507343278686905,-0.13857109526572012,9.984369578019571e-6,1.5056327351493116e-7];
+      if(z<0.5) return Math.log(Math.PI)-Math.log(Math.sin(Math.PI*z))-logGamma(1-z);
+      z-=1; let x=0.9999999999998099; for(let i=0;i<coefficients.length;i++) x+=coefficients[i]/(z+i+1);
+      const t=z+coefficients.length-.5; return .5*Math.log(2*Math.PI)+(z+.5)*Math.log(t)-t+Math.log(x);
+    }
+    function betaContinuedFraction(a,b,x) {
+      const max=200, eps=3e-7, fp=1e-30; let qab=a+b,qap=a+1,qam=a-1,c=1,d=1-qab*x/qap; d=Math.abs(d)<fp?fp:d; d=1/d; let h=d;
+      for(let m=1;m<=max;m++){const m2=2*m; let aa=m*(b-m)*x/((qam+m2)*(a+m2)); d=1+aa*d; d=Math.abs(d)<fp?fp:d; c=1+aa/c; c=Math.abs(c)<fp?fp:c; d=1/d; h*=d*c; aa=-(a+m)*(qab+m)*x/((a+m2)*(qap+m2)); d=1+aa*d; d=Math.abs(d)<fp?fp:d; c=1+aa/c; c=Math.abs(c)<fp?fp:c; d=1/d; const del=d*c; h*=del; if(Math.abs(del-1)<eps) break;} return h;
+    }
+    function regularizedBeta(x,a,b) {
+      if(x<=0) return 0; if(x>=1) return 1; const front=Math.exp(a*Math.log(x)+b*Math.log(1-x)-logGamma(a)-logGamma(b)+logGamma(a+b));
+      return x<(a+1)/(a+b+2)?front*betaContinuedFraction(a,b,x)/a:1-front*betaContinuedFraction(b,a,1-x)/b;
+    }
+    function tPValue(t,df) { const x=df/(df+t*t); return regularizedBeta(x,df/2,.5); }
+    function fPValue(f,d1,d2) { return 1-regularizedBeta(d1*f/(d1*f+d2),d1/2,d2/2); }
+    function calculateVIF(X) {
+      const count=X[0].length-1, values=[];
+      for(let target=1;target<=count;target++){
+        const columns=[0,...Array.from({length:count},(_,i)=>i+1).filter(i=>i!==target)];
+        const design=X.map(row=>columns.map(i=>row[i])), response=X.map(row=>row[target]);
+        const gram=Array.from({length:columns.length},()=>Array(columns.length).fill(0)), cross=Array(columns.length).fill(0);
+        for(let i=0;i<design.length;i++) for(let j=0;j<columns.length;j++){cross[j]+=design[i][j]*response[i];for(let k=0;k<columns.length;k++)gram[j][k]+=design[i][j]*design[i][k];}
+        try {
+          const coefficients=inverse(gram).map(row=>row.reduce((sum,value,j)=>sum+value*cross[j],0));
+          const average=response.reduce((sum,value)=>sum+value,0)/response.length;
+          const total=response.reduce((sum,value)=>sum+(value-average)**2,0);
+          const residual=response.reduce((sum,value,i)=>sum+(value-design[i].reduce((s,v,j)=>s+v*coefficients[j],0))**2,0);
+          const r2=total===0?1:1-residual/total;
+          values.push(r2>=1?Infinity:1/(1-Math.max(0,r2)));
+        } catch { values.push(Infinity); }
+      }
+      return values;
+    }
+    function train(rows, selectedFeatures=null) {
+      const keys=Object.keys(rows[0]), target="readingScore", cats=[...new Set(rows.map(r=>r.raceeth))].sort(), baseline="White";
+      if (!cats.includes(baseline)) throw Error("資料中找不到 raceeth=White，無法設定基準組");
+      cats.splice(cats.indexOf(baseline),1); cats.unshift(baseline);
+      const allFeatures=keys.filter(k=>k!==target && k!=="raceeth").concat(cats.slice(1).map(c=>"raceeth="+c)), features=selectedFeatures||allFeatures, names=["截距",...features];
+      const value=(row,name)=>name.startsWith("raceeth=")?(row.raceeth===name.slice(8)?1:0):Number(row[name]);
+      const X=rows.map(r=>[1,...features.map(name=>value(r,name))]), y=rows.map(r=>Number(r[target]));
+      const p=X[0].length, xtx=Array.from({length:p},()=>Array(p).fill(0)), xty=Array(p).fill(0);
+      for(let i=0;i<X.length;i++) for(let j=0;j<p;j++){xty[j]+=X[i][j]*y[i]; for(let k=0;k<p;k++) xtx[j][k]+=X[i][j]*X[i][k];}
+      for(let i=1;i<p;i++) xtx[i][i]+=1e-8; const inv=inverse(xtx), b=inv.map(row=>row.reduce((s,v,j)=>s+v*xty[j],0));
+      const pred=X.map(x=>x.reduce((s,v,j)=>s+v*b[j],0)), mean=y.reduce((a,v)=>a+v,0)/y.length, ssr=y.reduce((s,v,i)=>s+(v-pred[i])**2,0), sst=y.reduce((s,v)=>s+(v-mean)**2,0), r2=1-ssr/sst, df=y.length-p, s2=ssr/df;
+      const se=b.map((_,i)=>Math.sqrt(Math.max(0,s2*inv[i][i]))), t=b.map((v,i)=>v/se[i]), pValues=t.map(v=>tPValue(Math.abs(v),df)), sdY=Math.sqrt(y.reduce((s,v)=>s+(v-mean)**2,0)/(y.length-1)), sdX=features.map((_,j)=>{const avg=X.reduce((s,x)=>s+x[j+1],0)/X.length;return Math.sqrt(X.reduce((s,x)=>s+(x[j+1]-avg)**2,0)/(X.length-1));}), beta=features.map((_,i)=>b[i+1]*sdX[i]/sdY), fStatistic=(r2/features.length)/((1-r2)/df), fP=fPValue(fStatistic,features.length,df), vifs=calculateVIF(X);
+      const adjustedR2=1-(1-r2)*(y.length-1)/df;
+      return {b,pred,y,names,baseline,features,X,rmse:Math.sqrt(ssr/y.length),mae:y.reduce((s,v,i)=>s+Math.abs(v-pred[i]),0)/y.length,r2,adjustedR2,df,se,t,pValues,beta,fStatistic,fP,vifs};
+    }
+    function fmt(n){return Number(n).toLocaleString("zh-TW",{maximumFractionDigits:2});}
+    function pFmt(p){return p.toFixed(4);}
+    function significance(p){return p<.01?"***":p<.05?"**":p<.1?"*":"";}
+    function chineseFeature(name) {
+      const labels = {
+        grade:"年級", male:"性別（男生）", preschool:"曾就讀幼兒園",
+        expectBachelors:"預期取得學士學位", motherHS:"母親具高中學歷",
+        motherBachelors:"母親具學士學位", motherWork:"母親有工作",
+        fatherHS:"父親具高中學歷", fatherBachelors:"父親具學士學位",
+        fatherWork:"父親有工作", selfBornUS:"本人出生於美國",
+        motherBornUS:"母親出生於美國", fatherBornUS:"父親出生於美國",
+        englishAtHome:"家中使用英語", computerForSchoolwork:"有電腦可供學校作業使用",
+        read30MinsADay:"每天閱讀至少 30 分鐘", minutesPerWeekEnglish:"每週英語學習分鐘數",
+        studentsInEnglish:"英語課學生人數", schoolHasLibrary:"學校有圖書館",
+        publicSchool:"公立學校", urban:"都市地區學校", schoolSize:"學校規模",
+        "raceeth=American Indian/Alaska Native":"種族：美洲印第安人／阿拉斯加原住民",
+        "raceeth=Asian":"種族：亞洲人", "raceeth=Black":"種族：黑人",
+        "raceeth=Hispanic":"種族：西班牙裔", "raceeth=More than one race":"種族：多種族",
+        "raceeth=Native Hawaiian/Other Pacific Islander":"種族：夏威夷原住民／其他太平洋島民",
+        "raceeth=White":"種族：白人"
+      };
+      return labels[name] || name;
+    }
+    function render() {
+      const m=model, mean=m.y.reduce((a,v)=>a+v,0)/m.y.length;
+      $("status").textContent=`已載入 ${dataset.length.toLocaleString()} 筆完整資料，${m.features.length} 個特徵`;
+      $("stats").innerHTML=`<div class="stat"><span class="muted">完整樣本</span><b>${dataset.length.toLocaleString()}</b></div><div class="stat"><span class="muted">特徵數</span><b>${m.features.length}</b></div><div class="stat"><span class="muted">平均分數</span><b>${fmt(mean)}</b></div><div class="stat"><span class="muted">raceeth 基準</span><b style="font-size:16px">${m.baseline}</b></div>`;
+      $("metrics").innerHTML=`<div class="stat"><span class="muted">R²</span><b>${m.r2.toFixed(4)}</b></div><div class="stat"><span class="muted">調整後 R²</span><b>${m.adjustedR2.toFixed(4)}</b></div><div class="stat"><span class="muted">RMSE</span><b>${fmt(m.rmse)}</b></div><div class="stat"><span class="muted">MAE</span><b>${fmt(m.mae)}</b></div><div class="stat"><span class="muted">整體 F 檢定</span><b>${m.fStatistic.toFixed(2)}</b><small>p = ${pFmt(m.fP)}</small></div>`;
+      $("formula").textContent=m.names.map((n,i)=>`${i?" + ":""}${m.b[i].toFixed(3)}×${n}`).join("");
+      $("coefs").innerHTML=m.names.slice(1).map((n,i)=>{const c=m.b[i+1], p=m.pValues[i+1], vif=Number.isFinite(m.vifs[i])?m.vifs[i].toFixed(2):"∞";return `<tr><td>${n}</td><td>${chineseFeature(n)}</td><td class="right ${c>=0?"coef-positive":"coef-negative"}">${c.toFixed(4)}${significance(p)}</td><td class="right">${m.beta[i].toFixed(4)}</td><td class="right">${m.t[i+1].toFixed(3)}</td><td class="right">${pFmt(p)}</td><td class="right">${vif}</td></tr>`}).join("");
+      renderReduced(); renderResiduals(); draw(); renderReport();
+    }
+    function renderResiduals() {
+      const features=reducedModel.features, value=(row,name)=>name.startsWith("raceeth=")?(row.raceeth===name.slice(8)?1:0):row[name];
+      $("residual-head").innerHTML=`<tr><th>原始列</th>${features.map(name=>`<th>${chineseFeature(name)}</th>`).join("")}<th class="right">實際 readingScore</th><th class="right">預測值</th><th class="right">殘差</th><th class="right">誤差百分比</th></tr>`;
+      $("residuals").innerHTML=dataset.map((row,i)=>{
+        const actual=model.y[i], residual=actual-model.pred[i], percentage=Math.abs(residual)/Math.abs(actual)*100;
+        return `<tr><td>${i+2}</td>${features.map(name=>`<td>${value(row,name)}</td>`).join("")}<td class="right">${fmt(actual)}</td><td class="right">${fmt(model.pred[i])}</td><td class="right">${fmt(residual)}</td><td class="right">${percentage.toFixed(1)}%</td></tr>`;
+      }).join("");
+    }
+    function renderReduced() {
+      const m=model, reduced=reducedModel, retained=m.features.filter((_,i)=>m.pValues[i+1]<.1);
+      $("reduced-model").innerHTML=`<p>採用單次係數檢定規則：保留完整模型中 <b>p &lt; 0.1</b> 的特徵，並以保留的 ${retained.length} 個特徵重新估計模型。</p><div class="stats"><div class="stat"><span class="muted">保留特徵數</span><b>${retained.length}</b><small>原模型 ${m.features.length} 個</small></div><div class="stat"><span class="muted">縮減後 R²</span><b>${reduced.r2.toFixed(4)}</b><small>原模型 ${m.r2.toFixed(4)}</small></div><div class="stat"><span class="muted">縮減後調整後 R²</span><b>${reduced.adjustedR2.toFixed(4)}</b><small>原模型 ${m.adjustedR2.toFixed(4)}</small></div><div class="stat"><span class="muted">縮減後 RMSE</span><b>${fmt(reduced.rmse)}</b><small>原模型 ${fmt(m.rmse)}</small></div><div class="stat"><span class="muted">縮減後 MAE</span><b>${fmt(reduced.mae)}</b><small>原模型 ${fmt(m.mae)}</small></div><div class="stat"><span class="muted">縮減後整體 F</span><b>${reduced.fStatistic.toFixed(2)}</b><small>p = ${pFmt(reduced.fP)}</small></div></div><h3>保留的特徵</h3><p>${retained.map(name=>`<span class="status" style="margin:3px;display:inline-block">${chineseFeature(name)} (${name})</span>`).join("")}</p>`;
+    }
+    function renderReport() {
+      const m=model, mean=m.y.reduce((a,v)=>a+v,0)/m.y.length, ranked=m.names.slice(1).map((name,i)=>({name,impact:Math.abs(m.beta[i])})).sort((a,b)=>b.impact-a.impact), top=ranked.slice(0,3).map(x=>`<b>${x.name}</b>`).join("、");
+      const quality=m.r2>=0.7?"解釋力良好":m.r2>=0.4?"具有中度解釋力":"解釋力有限";
+      $("report").innerHTML=`<h3>一、資料與方法</h3><p>本分析使用 PISA 2009 資料中 ${dataset.length.toLocaleString()} 筆沒有缺失值的樣本，將 <code>readingScore</code> 作為應變數。數值欄位直接納入模型，<code>raceeth</code> 則以 one-hot 編碼處理，基準組為「${m.baseline}」。模型採用普通最小平方法（OLS）估計各特徵與閱讀分數的線性關係。</p><h3>二、模型表現與整體 F 檢定</h3><p>模型的 R² 為 <b>${m.r2.toFixed(4)}</b>，調整後 R² 為 <b>${m.adjustedR2.toFixed(4)}</b>，前者表示模型能解釋閱讀分數變異的約 <b>${(m.r2*100).toFixed(1)}%</b>，後者則在解釋力中扣除納入特徵數量的影響；RMSE 為 <b>${fmt(m.rmse)}</b> 分，MAE 為 <b>${fmt(m.mae)}</b> 分。整體 F(${m.features.length}, ${m.df}) = <b>${m.fStatistic.toFixed(2)}</b>，p = <b>${pFmt(m.fP)}</b>，用來檢定所有斜率係數同時為 0；此結果${m.fP<.05?"拒絕":"未能拒絕"}整體係數皆為 0 的虛無假設。模型${quality}，但這些指標只反映目前資料內的配適程度。</p><h3>三、特徵解讀與 t 檢定</h3><p>表格中的「標準化係數 β」是正式定義：原始係數 × 特徵標準差 ÷ readingScore 標準差；t 值與 p 值則檢定單一係數是否為 0。依 |β| 排序，目前影響最大的前三項特徵為：${top}。一般以 p &lt; .05 作為統計顯著的參考門檻，但顯著不代表因果關係。</p><h3>四、共線性 VIF</h3><p>VIF（Variance Inflation Factor，變異膨脹因子）衡量特徵與其他自變數的線性重疊程度。通常 VIF &lt; 5 表示共線性尚可接受，5–10 表示需要注意，VIF ≥ 10 則代表嚴重共線性；VIF 越高，個別係數的標準誤可能越大、t 檢定也可能變得不穩定。</p><h3>五、研究限制</h3><p>本頁採用完整案例分析，含有任何 <code>NA</code> 的資料列都被排除，可能造成樣本選擇偏誤；模型未切分訓練集與測試集。因此，結果適合用於探索資料中的關聯，若要進行正式預測，應再加入交叉驗證、測試集評估及殘差診斷。</p>`;
+    }
+    function draw(){const c=$("plot"),ctx=c.getContext("2d"),w=c.width,h=c.height,pad=42, vals=model.y.concat(model.pred), lo=Math.min(...vals),hi=Math.max(...vals), sx=x=>pad+(x-lo)/(hi-lo)*(w-pad*1.5), sy=y=>h-pad-(y-lo)/(hi-lo)*(h-pad*1.5);ctx.clearRect(0,0,w,h);ctx.strokeStyle="#b7c1d1";ctx.beginPath();ctx.moveTo(sx(lo),sy(lo));ctx.lineTo(sx(hi),sy(hi));ctx.stroke();ctx.fillStyle="#2867ad";model.pred.forEach((prediction,i)=>{ctx.beginPath();ctx.arc(sx(prediction),sy(model.y[i]),3,0,Math.PI*2);ctx.fill()});ctx.fillStyle="#667085";ctx.font="12px sans-serif";ctx.fillText("預測值",w/2,h-8);ctx.save();ctx.translate(12,h/2);ctx.rotate(-Math.PI/2);ctx.fillText("實際值",0,0);ctx.restore();}
+    async function load(text){try{const raw=parseCSV(text), keys=Object.keys(raw[0]||{}); if(!keys.includes("readingScore")) throw Error("找不到 readingScore 欄位"); dataset=raw.filter(r=>keys.every(k=>r[k]!==""&&r[k].toUpperCase()!=="NA")&&Number.isFinite(Number(r.readingScore))); if(!dataset.length) throw Error("沒有可用的完整資料列"); model=train(dataset); reducedModel=train(dataset,model.features.filter((_,i)=>model.pValues[i+1]<.1)); render();}catch(e){$("status").textContent="載入失敗："+e.message;}}
+    fetch("pisa2009train.csv").then(r=>{if(!r.ok)throw Error("找不到內建資料檔");return r.text()}).then(load).catch(e=>{$("status").textContent="內建資料載入失敗："+e.message;});
+  </script>
+</body>
+</html>
